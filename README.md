@@ -1,5 +1,9 @@
 # 🐸 Froggy Invaders
 
+## Screenshot
+
+![Froggy Invaders Screenshot](screenshot.png)
+
 A browser-based arcade shooter inspired by classic *Space Invaders* mechanics — but starring a determined frog defending against airborne bugs.
 
 Built using pure HTML5 Canvas and JavaScript. No frameworks.
