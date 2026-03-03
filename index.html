@@ -1,1 +1,720 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Froggy Invaders</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#000;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    height:100vh;
+    overflow:hidden;
+    font-family:'Press Start 2P', monospace;
+  }
+  #ui {
+    color:#00ff88;
+    width:800px;
+    display:flex;
+    justify-content:space-between;
+    padding:8px 12px;
+    font-size:11px;
+    text-shadow:0 0 8px #00ff88;
+    background:rgba(0,255,136,0.05);
+    border:1px solid rgba(0,255,136,0.2);
+    border-bottom:none;
+  }
+  #ui span { letter-spacing:1px; }
+  canvas {
+    display:block;
+    border:1px solid rgba(0,255,136,0.3);
+    box-shadow:0 0 40px rgba(0,255,136,0.15), inset 0 0 80px rgba(0,0,0,0.5);
+  }
+  #controls {
+    color:rgba(0,255,136,0.4);
+    font-size:7px;
+    margin-top:8px;
+    letter-spacing:1px;
+  }
+</style>
+</head>
+<body>
+<div id="ui">
+  <span>SCORE: <span id="scoreDisplay">0</span></span>
+  <span id="comboDisplay"></span>
+  <span>HI: <span id="hiDisplay">0</span></span>
+  <span>LIVES: <span id="livesDisplay">●●●</span></span>
+  <span>WAVE: <span id="waveDisplay">1</span></span>
+</div>
+<canvas id="game" width="800" height="520"></canvas>
+<div id="controls">← → MOVE &nbsp;|&nbsp; SPACE SHOOT &nbsp;|&nbsp; SURVIVE THE SWARM</div>
 
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+let state = "title";
+let score = 0, hiScore = 0, lives = 3, wave = 1, combo = 0, comboTimer = 0;
+let bugs = [], bullets = [], particles = [], stars = [], shields = [];
+let bugDir = 1, bugDropQueued = false;
+let shootCooldown = 0;
+let flashTimer = 0, shakeX = 0, shakeY = 0;
+let waveClearDelay = 0;
+
+const frog = { x: W/2, y: H - 55, speed: 4 };
+
+const keys = {};
+document.addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (e.code === "Space") e.preventDefault();
+  if ((e.code === "Space" || e.code === "Enter") && state === "title") startGame();
+  if ((e.code === "Space" || e.code === "Enter") && state === "gameover") initTitle();
+});
+document.addEventListener("keyup", e => { keys[e.code] = false; });
+
+function initStars() {
+  stars = [];
+  for (let i = 0; i < 130; i++) {
+    stars.push({ x: Math.random()*W, y: Math.random()*H,
+      r: Math.random()*1.5+0.3, speed: 0.15+Math.random()*0.35,
+      alpha: 0.3+Math.random()*0.7, twinkle: Math.random()*Math.PI*2 });
+  }
+}
+
+function initShields() {
+  shields = [];
+  [130, 295, 460, 625].forEach(sx => {
+    for (let bx = 0; bx < 8; bx++)
+      for (let by = 0; by < 4; by++) {
+        if (bx >= 3 && bx <= 4 && by >= 2) continue; // arch gap
+        if ((bx===0||bx===7) && by===0) continue;     // top outer corners
+        shields.push({ x: sx + bx*7, y: H-118 + by*7, alive: true, hp: 2 });
+      }
+  });
+}
+
+function spawnWave() {
+  bugs = [];
+  bugDir = 1;
+  bugDropQueued = false;
+  const cols = Math.min(11, 7 + wave);
+  const rows = Math.min(5, 2 + Math.floor(wave/2));
+  const types = ["fly","bee","moth","roach","wasp"];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      bugs.push({
+        x: 60 + c * Math.floor((W-120)/cols),
+        y: 55 + r * 52,
+        startY: 55 + r * 52,
+        w: 36, h: 28,
+        type: types[Math.min(r, types.length-1)],
+        alive: true,
+        animFrame: (c+r) % 2,
+        animTimer: Math.random() * 30,
+        row: r, col: c,
+        pts: (rows - r) * 10
+      });
+    }
+  }
+}
+
+function startGame() {
+  score = 0; lives = 3; wave = 1; combo = 0; comboTimer = 0;
+  bullets = []; particles = [];
+  frog.x = W/2;
+  spawnWave();
+  initShields();
+  state = "playing";
+  updateUI();
+}
+
+function initTitle() {
+  state = "title";
+  bugs = []; bullets = []; particles = [];
+  spawnWave();
+}
+
+// ── Bug colors ──────────────────────────────────────────────────────
+const bugColors = {
+  fly:   { body:"#556655", wing:"rgba(180,220,255,0.5)", eye:"#ff3030", stripe: null },
+  bee:   { body:"#ffcc00", wing:"rgba(220,240,200,0.55)", eye:"#333", stripe:"#222" },
+  moth:  { body:"#9966cc", wing:"rgba(220,180,255,0.5)", eye:"#ff99ff", stripe: null },
+  roach: { body:"#7a4a18", wing:"rgba(160,120,80,0.4)", eye:"#ff6600", stripe: null },
+  wasp:  { body:"#ff6600", wing:"rgba(255,220,180,0.45)", eye:"#ffff00", stripe:"#cc2200" },
+};
+
+function drawBug(b) {
+  if (!b.alive) return;
+  const c = bugColors[b.type];
+  const flap = b.animFrame === 0;
+  const x = b.x, y = b.y;
+
+  // wings
+  ctx.save();
+  ctx.globalAlpha = 0.8;
+  ctx.fillStyle = c.wing;
+  const wspan = flap ? 19 : 13;
+  const wh    = flap ? 8 : 12;
+  ctx.beginPath(); ctx.ellipse(x-wspan/2-5, y-3, wspan/2, wh, -0.25, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+wspan/2+5, y-3, wspan/2, wh,  0.25, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // body
+  ctx.fillStyle = c.body;
+  ctx.beginPath(); ctx.ellipse(x, y, 9, 13, 0, 0, Math.PI*2); ctx.fill();
+
+  // stripes
+  if (c.stripe) {
+    ctx.save();
+    ctx.globalCompositeOperation = "source-atop";
+    ctx.fillStyle = c.stripe;
+    // clip to body
+    ctx.beginPath(); ctx.ellipse(x, y, 9, 13, 0, 0, Math.PI*2); ctx.clip();
+    for (let s = -1; s <= 1; s++) ctx.fillRect(x-10, y+s*6-2, 20, 3);
+    ctx.restore();
+  }
+
+  // head
+  ctx.fillStyle = c.body;
+  ctx.beginPath(); ctx.arc(x, y-12, 7, 0, Math.PI*2); ctx.fill();
+
+  // eyes
+  ctx.fillStyle = c.eye;
+  ctx.beginPath(); ctx.arc(x-3.5, y-13, 2.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+3.5, y-13, 2.5, 0, Math.PI*2); ctx.fill();
+
+  // antennae
+  ctx.strokeStyle = c.body; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x-3, y-18); ctx.lineTo(x-8, y-27); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x+3, y-18); ctx.lineTo(x+8, y-27); ctx.stroke();
+  ctx.fillStyle = c.eye;
+  ctx.beginPath(); ctx.arc(x-8, y-27, 2.2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+8, y-27, 2.2, 0, Math.PI*2); ctx.fill();
+
+  // legs
+  ctx.strokeStyle = c.body; ctx.lineWidth = 1;
+  for (let l = -1; l <= 1; l++) {
+    ctx.beginPath(); ctx.moveTo(x-9, y+l*4); ctx.lineTo(x-17, y+l*4+5); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+9, y+l*4); ctx.lineTo(x+17, y+l*4+5); ctx.stroke();
+  }
+}
+
+function drawFrog(x, y) {
+  const blink = (Date.now() % 3800 < 120);
+
+  // shadow
+  ctx.save();
+  ctx.globalAlpha = 0.12;
+  ctx.fillStyle = "#00ff88";
+  ctx.beginPath(); ctx.ellipse(x, y+22, 22, 7, 0, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // body glow
+  const grd = ctx.createRadialGradient(x-5, y-5, 2, x, y, 26);
+  grd.addColorStop(0, "#6eff88");
+  grd.addColorStop(1, "#1a7a30");
+  ctx.fillStyle = grd;
+  ctx.beginPath(); ctx.ellipse(x, y+4, 20, 17, 0, 0, Math.PI*2); ctx.fill();
+
+  // belly
+  ctx.fillStyle = "#b8ffcc";
+  ctx.beginPath(); ctx.ellipse(x, y+8, 12, 10, 0, 0, Math.PI*2); ctx.fill();
+
+  // back legs
+  ctx.fillStyle = "#2a9a3a";
+  ctx.beginPath(); ctx.ellipse(x-18, y+14, 8, 5, -0.4, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+18, y+14, 8, 5,  0.4, 0, Math.PI*2); ctx.fill();
+  // front feet
+  ctx.fillStyle = "#3aaa4a";
+  ctx.beginPath(); ctx.ellipse(x-14, y+19, 6, 4, -0.2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x+14, y+19, 6, 4,  0.2, 0, Math.PI*2); ctx.fill();
+
+  // eye bumps
+  ctx.fillStyle = "#22882a";
+  ctx.beginPath(); ctx.arc(x-11, y-12, 9, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+11, y-12, 9, 0, Math.PI*2); ctx.fill();
+
+  // eyes white
+  ctx.fillStyle = "white";
+  ctx.beginPath(); ctx.arc(x-11, y-13, 7, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+11, y-13, 7, 0, Math.PI*2); ctx.fill();
+
+  if (!blink) {
+    ctx.fillStyle = "#111";
+    ctx.beginPath(); ctx.arc(x-10, y-13, 3.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+10, y-13, 3.5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "white";
+    ctx.beginPath(); ctx.arc(x-9, y-14.5, 1.3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+11, y-14.5, 1.3, 0, Math.PI*2); ctx.fill();
+  } else {
+    ctx.strokeStyle = "#0a4a12"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x-15, y-13); ctx.lineTo(x-7, y-13); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x+7,  y-13); ctx.lineTo(x+15, y-13); ctx.stroke();
+  }
+
+  // mouth
+  ctx.strokeStyle = "#155520"; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(x, y+4, 8, 0.25, Math.PI-0.25); ctx.stroke();
+
+  // gun nub
+  ctx.fillStyle = "#0a6618";
+  ctx.beginPath(); ctx.roundRect(x-3, y-26, 6, 10, 2); ctx.fill();
+}
+
+function drawBullet(b) {
+  ctx.save();
+  ctx.shadowColor = "#00ff88"; ctx.shadowBlur = 14;
+  ctx.fillStyle = "#00ff88";
+  ctx.beginPath(); ctx.roundRect(b.x-3, b.y-10, 6, 20, 3); ctx.fill();
+  ctx.fillStyle = "white";
+  ctx.beginPath(); ctx.roundRect(b.x-1, b.y-10, 2, 20, 1); ctx.fill();
+  ctx.restore();
+}
+
+function boom(x, y, color, count=16) {
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI*2/count)*i + Math.random()*0.5;
+    const spd = 1.5 + Math.random()*4;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle)*spd,
+      vy: Math.sin(angle)*spd - 1,
+      life: 28+Math.random()*28,
+      maxLife: 56,
+      r: 2+Math.random()*3,
+      color,
+      type: Math.random()<0.6 ? "circle" : "square"
+    });
+  }
+}
+
+// ── Update ──────────────────────────────────────────────────────────
+function update() {
+  stars.forEach(s => {
+    s.y += s.speed;
+    s.twinkle += 0.04;
+    if (s.y > H) { s.y = 0; s.x = Math.random()*W; }
+  });
+
+  if (state !== "playing") {
+    animBugs();
+    if (state === "title") {
+      // decorative bug march
+      const alive = bugs.filter(b=>b.alive);
+      if (alive.length) {
+        const spd = 0.5;
+        const maxX = Math.max(...alive.map(b=>b.x));
+        const minX = Math.min(...alive.map(b=>b.x));
+        if (bugDropQueued) {
+          bugs.forEach(b => b.y += 14);
+          bugDir *= -1;
+          bugDropQueued = false;
+          if (bugs[0] && bugs[0].y > H - 50) spawnWave();
+        } else {
+          bugs.forEach(b => b.x += bugDir * spd);
+          if (maxX > W-50 || minX < 50) bugDropQueued = true;
+        }
+      }
+    }
+    updateParticles();
+    return;
+  }
+
+  // Frog movement
+  if (keys["ArrowLeft"])  frog.x = Math.max(22, frog.x - frog.speed);
+  if (keys["ArrowRight"]) frog.x = Math.min(W-22, frog.x + frog.speed);
+
+  // Shoot
+  if (keys["Space"] && shootCooldown <= 0) {
+    bullets.push({ x: frog.x, y: frog.y-28, vy: -11, enemy: false });
+    shootCooldown = 18;
+  }
+  if (shootCooldown > 0) shootCooldown--;
+
+  // Player bullets
+  for (let i = bullets.length-1; i >= 0; i--) {
+    const b = bullets[i];
+    if (b.enemy) continue;
+    b.y += b.vy;
+    if (b.y < -20) { bullets.splice(i,1); continue; }
+
+    // vs shield
+    let done = false;
+    for (let s = shields.length-1; s >= 0; s--) {
+      const sh = shields[s];
+      if (!sh.alive) continue;
+      if (Math.abs(b.x-sh.x)<5 && Math.abs(b.y-sh.y)<5) {
+        sh.hp--;
+        if (sh.hp <= 0) { sh.alive = false; boom(sh.x, sh.y, "#00cc66", 4); }
+        bullets.splice(i,1); done = true; break;
+      }
+    }
+    if (done) continue;
+
+    // vs bug
+    for (let j = 0; j < bugs.length; j++) {
+      const bug = bugs[j];
+      if (!bug.alive || !bullets[i]) continue;
+      if (Math.abs(bullets[i].x-bug.x)<bug.w/2+4 && Math.abs(bullets[i].y-bug.y)<bug.h/2+10) {
+        bug.alive = false;
+        const c = bugColors[bug.type];
+        boom(bug.x, bug.y, c.body, 20);
+        boom(bug.x, bug.y, c.eye, 6);
+        shakeX = 4; shakeY = 3;
+        combo++;
+        comboTimer = 130;
+        const mul = combo>=6 ? 4 : combo>=4 ? 3 : combo>=2 ? 2 : 1;
+        const pts = bug.pts * mul;
+        score += pts;
+        if (score > hiScore) hiScore = score;
+        particles.push({ x:bug.x, y:bug.y-8, vx:0, vy:-1.2,
+          life:55, maxLife:55, text:"+"+pts,
+          color: combo>=6?"#ffdd00":combo>=4?"#ff9900":"#00ff88", type:"text" });
+        bullets.splice(i,1);
+        updateUI();
+        break;
+      }
+    }
+  }
+
+  // Enemy bullets
+  for (let i = bullets.length-1; i >= 0; i--) {
+    const b = bullets[i];
+    if (!b.enemy) continue;
+    b.y += b.vy;
+    if (b.y > H+20) { bullets.splice(i,1); continue; }
+
+    // vs shield
+    let done = false;
+    for (let s = shields.length-1; s >= 0; s--) {
+      const sh = shields[s];
+      if (!sh.alive) continue;
+      if (Math.abs(b.x-sh.x)<5 && Math.abs(b.y-sh.y)<5) {
+        sh.hp--;
+        if (sh.hp <= 0) { sh.alive = false; boom(sh.x, sh.y, "#00cc66", 4); }
+        bullets.splice(i,1); done = true; break;
+      }
+    }
+    if (done) continue;
+
+    // vs frog
+    if (bullets[i] && Math.abs(b.x-frog.x)<22 && Math.abs(b.y-frog.y)<22) {
+      bullets.splice(i,1);
+      killFrog();
+      return;
+    }
+  }
+
+  // Combo decay
+  if (comboTimer > 0) { comboTimer--; if (comboTimer===0) { combo=0; updateUI(); } }
+
+  moveBugs();
+  animBugs();
+
+  // Bug logic: direct collision kills frog; reaching the bottom wraps entire formation to top
+  const alive = bugs.filter(b=>b.alive);
+  for (const bug of alive) {
+    if (Math.abs(bug.x-frog.x)<26 && Math.abs(bug.y-frog.y)<26) { killFrog(); return; }
+  }
+  if (alive.some(b => b.y > H - 50)) {
+    bugs.forEach(b => { b.y = b.startY; });
+    bugDropQueued = false;
+  }
+
+  // Wave clear
+  if (alive.length === 0) {
+    waveClearDelay++;
+    if (waveClearDelay > 90) {
+      wave++;
+      waveClearDelay = 0;
+      spawnWave();
+      initShields();
+      updateUI();
+      // wave clear bonus
+      score += wave * 50;
+      particles.push({ x:W/2, y:H/2, vx:0, vy:-1,
+        life:90, maxLife:90, text:"WAVE CLEAR! +"+wave*50,
+        color:"#ffdd00", type:"text" });
+      updateUI();
+    }
+  }
+
+  updateParticles();
+
+  if (flashTimer > 0) flashTimer--;
+  if (shakeX > 0) shakeX = Math.max(0, shakeX-0.4);
+  if (shakeY > 0) shakeY = Math.max(0, shakeY-0.4);
+}
+
+function moveBugs() {
+  const alive = bugs.filter(b=>b.alive);
+  if (!alive.length) return;
+
+  // Speed: gentle base, mild scaling — never runaway fast
+  const spd = Math.min(2.2, 0.4 + (wave-1)*0.08 + (bugs.length - alive.length)*0.012);
+  const minX = Math.min(...alive.map(b=>b.x));
+  const maxX = Math.max(...alive.map(b=>b.x));
+
+  if (bugDropQueued) {
+    bugs.forEach(b => b.y += 4); // small drop per bounce — takes many passes to reach bottom
+    bugDir *= -1;
+    bugDropQueued = false;
+  } else {
+    bugs.forEach(b => b.x += bugDir * spd);
+    if (maxX > W-35 || minX < 35) bugDropQueued = true;
+  }
+
+  // Enemy shoot
+  if (Math.random() < 0.003 + wave*0.0008 && alive.length) {
+    const shooter = alive[Math.floor(Math.random()*alive.length)];
+    bullets.push({ x:shooter.x, y:shooter.y+14, vy: 3+wave*0.25, enemy:true });
+  }
+}
+
+function animBugs() {
+  bugs.forEach(b => {
+    b.animTimer++;
+    if (b.animTimer > 22) { b.animTimer=0; b.animFrame = 1-b.animFrame; }
+  });
+}
+
+function updateParticles() {
+  for (let i = particles.length-1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    if (p.type !== "text") p.vy += 0.09;
+    p.life--;
+    if (p.life <= 0) particles.splice(i,1);
+  }
+}
+
+function killFrog() {
+  boom(frog.x, frog.y, "#4eff70", 32);
+  boom(frog.x, frog.y, "#ffffff", 10);
+  flashTimer = 22;
+  lives--;
+  combo = 0;
+  updateUI();
+  if (lives <= 0) {
+    if (score > hiScore) hiScore = score;
+    updateUI();
+    state = "gameover";
+  } else {
+    frog.x = W/2;
+    bullets = bullets.filter(b=>b.enemy); // keep enemy bullets
+    shootCooldown = 40;
+  }
+}
+
+// ── Draw ────────────────────────────────────────────────────────────
+function draw() {
+  const sx = shakeX > 0.3 ? (Math.random()-0.5)*shakeX*2 : 0;
+  const sy = shakeY > 0.3 ? (Math.random()-0.5)*shakeY*2 : 0;
+  ctx.save();
+  ctx.translate(sx, sy);
+
+  // BG
+  ctx.fillStyle = "#060a10";
+  ctx.fillRect(-5,-5,W+10,H+10);
+
+  // Stars
+  stars.forEach(s => {
+    const a = s.alpha * (0.5 + 0.5*Math.sin(s.twinkle));
+    ctx.globalAlpha = a;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  // Subtle grid
+  ctx.strokeStyle = "rgba(0,255,136,0.03)";
+  ctx.lineWidth = 1;
+  for (let x=0; x<W; x+=40) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for (let y=0; y<H; y+=40) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+
+  // Scanlines
+  ctx.fillStyle = "rgba(0,0,0,0.07)";
+  for (let y=0; y<H; y+=3) ctx.fillRect(0,y,W,1);
+
+  // Ground line
+  ctx.strokeStyle = "rgba(0,255,136,0.3)";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6,4]);
+  ctx.beginPath(); ctx.moveTo(0, H-30); ctx.lineTo(W, H-30); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Shields
+  shields.forEach(sh => {
+    if (!sh.alive) return;
+    const alpha = sh.hp / 2;
+    ctx.save();
+    ctx.globalAlpha = 0.4 + alpha*0.6;
+    ctx.shadowColor = "#00ff88"; ctx.shadowBlur = 4*alpha;
+    ctx.fillStyle = `hsl(140,100%,${28+alpha*28}%)`;
+    ctx.fillRect(sh.x-2, sh.y-2, 5, 5);
+    ctx.restore();
+  });
+
+  // Bugs
+  bugs.forEach(b => drawBug(b));
+
+  // Frog
+  if (state === "playing") {
+    if (!(flashTimer > 0 && Math.floor(flashTimer/3)%2===1)) {
+      drawFrog(frog.x, frog.y);
+    }
+  }
+
+  // Bullets
+  bullets.forEach(b => {
+    if (b.enemy) {
+      ctx.save();
+      ctx.shadowColor = "#ff4400"; ctx.shadowBlur = 12;
+      ctx.fillStyle = "#ff5533";
+      ctx.beginPath(); ctx.roundRect(b.x-3, b.y-9, 6, 18, 3); ctx.fill();
+      ctx.fillStyle = "#ffaa66";
+      ctx.beginPath(); ctx.roundRect(b.x-1, b.y-9, 2, 18, 1); ctx.fill();
+      ctx.restore();
+    } else {
+      drawBullet(b);
+    }
+  });
+
+  // Particles
+  particles.forEach(p => {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha;
+    if (p.type === "text") {
+      ctx.save();
+      ctx.shadowColor = p.color; ctx.shadowBlur = 8;
+      ctx.fillStyle = p.color;
+      ctx.font = "bold 10px 'Press Start 2P'";
+      ctx.textAlign = "center";
+      ctx.fillText(p.text, p.x, p.y);
+      ctx.restore();
+      ctx.textAlign = "left";
+    } else if (p.type === "circle") {
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+    } else {
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x-p.r/2, p.y-p.r/2, p.r, p.r);
+    }
+  });
+  ctx.globalAlpha = 1;
+
+  // Flash
+  if (flashTimer > 0) {
+    ctx.fillStyle = `rgba(255,80,0,${flashTimer/22*0.3})`;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  // ── Title ──
+  if (state === "title") {
+    ctx.fillStyle = "rgba(6,10,16,0.78)";
+    ctx.fillRect(0,0,W,H);
+
+    ctx.save();
+    ctx.shadowColor = "#00ff88"; ctx.shadowBlur = 35;
+    ctx.fillStyle = "#00ff88";
+    ctx.font = "28px 'Press Start 2P'";
+    ctx.textAlign = "center";
+    ctx.fillText("FROGGY INVADERS", W/2, H/2-75);
+    ctx.restore();
+
+    ctx.fillStyle = "rgba(0,255,136,0.6)";
+    ctx.font = "9px 'Press Start 2P'";
+    ctx.textAlign = "center";
+    ctx.fillText("DEFEND THE SWAMP FROM THE BUG ARMADA", W/2, H/2-40);
+
+    if (Math.floor(Date.now()/550)%2===0) {
+      ctx.save();
+      ctx.shadowColor = "#ffffff"; ctx.shadowBlur = 10;
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "12px 'Press Start 2P'";
+      ctx.fillText("PRESS SPACE TO PLAY", W/2, H/2+15);
+      ctx.restore();
+    }
+
+    ctx.fillStyle = "rgba(0,255,136,0.45)";
+    ctx.font = "8px 'Press Start 2P'";
+    ctx.fillText("← →  MOVE     SPACE  SHOOT", W/2, H/2+55);
+
+    // Bug legend
+    const types = ["fly","bee","moth","roach","wasp"];
+    const pts   = [10,20,30,40,50];
+    types.forEach((t, i) => {
+      const bx = W/2 - 140 + i*70;
+      const by = H/2 + 105;
+      drawBug({ x:bx, y:by-10, w:36, h:28, type:t, alive:true, animFrame:0, animTimer:0 });
+      ctx.fillStyle = "#00ff88";
+      ctx.font = "7px 'Press Start 2P'";
+      ctx.fillText(pts[i]+" PTS", bx-16, by+18);
+    });
+
+    ctx.textAlign = "left";
+  }
+
+  // ── Game Over ──
+  if (state === "gameover") {
+    ctx.fillStyle = "rgba(6,10,16,0.85)";
+    ctx.fillRect(0,0,W,H);
+    ctx.save();
+    ctx.shadowColor = "#ff3300"; ctx.shadowBlur = 35;
+    ctx.fillStyle = "#ff4422";
+    ctx.font = "28px 'Press Start 2P'";
+    ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", W/2, H/2-65);
+    ctx.restore();
+    ctx.fillStyle = "#00ff88";
+    ctx.font = "12px 'Press Start 2P'";
+    ctx.textAlign = "center";
+    ctx.fillText("SCORE   " + score, W/2, H/2-10);
+    ctx.fillStyle = "#ffdd00";
+    ctx.fillText("BEST    " + hiScore, W/2, H/2+20);
+    ctx.fillStyle = "rgba(0,255,136,0.6)";
+    ctx.font = "8px 'Press Start 2P'";
+    ctx.fillText("WAVE REACHED: " + wave, W/2, H/2+50);
+    if (Math.floor(Date.now()/550)%2===0) {
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "10px 'Press Start 2P'";
+      ctx.fillText("PRESS SPACE TO RETRY", W/2, H/2+85);
+    }
+    ctx.textAlign = "left";
+  }
+
+  ctx.restore();
+}
+
+function updateUI() {
+  document.getElementById("scoreDisplay").textContent = score;
+  document.getElementById("hiDisplay").textContent = hiScore;
+  document.getElementById("waveDisplay").textContent = wave;
+  document.getElementById("livesDisplay").textContent =
+    ["●","●","●"].map((_,i)=> i<lives?"●":"○").join("");
+  const cd = document.getElementById("comboDisplay");
+  if (combo >= 2) {
+    cd.textContent = "COMBO x"+combo+(combo>=6?" 🔥":"");
+    cd.style.color = combo>=6?"#ffdd00":combo>=4?"#ff9900":"#88ffaa";
+  } else {
+    cd.textContent = "";
+  }
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+initStars();
+initTitle();
+loop();
+</script>
+</body>
+</html>
