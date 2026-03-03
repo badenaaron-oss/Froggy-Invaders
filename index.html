@@ -259,7 +259,7 @@ function killBug(bug){
     localStorage.setItem("froggy_high_score",state.highScore);
   }
 
-  createExplosion(bug.x,bug.y);
+// createExplosion(bug.x, bug.y);
   playSound(bug.value>300?90:400,0.12,bug.value>300?"sawtooth":"triangle");
 
   bugs = bugs.filter(b=>b!==bug);
