@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Froggy Invaders</title>
+<style>
+body {
+  margin: 0;
+  background: radial-gradient(circle at center, #0a1a3a, #020814);
+  font-family: system-ui, sans-serif;
+  color: white;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+h1 { margin: 10px 0; }
+
+canvas {
+  background: linear-gradient(#1e3a8a, #0f172a);
+  border-radius: 20px;
+  border: 4px solid #111;
+  box-shadow: 0 0 50px rgba(0,120,255,0.4);
+}
+
+button {
+  margin-top: 10px;
+  padding: 10px 20px;
+  border-radius: 20px;
+  border: none;
+  background: #4ade80;
+  font-weight: bold;
+  cursor: pointer;
+}
+</style>
+</head>
+<body>
+
+<h1>🐸 Froggy Invaders</h1>
+<canvas id="game" width="600" height="800"></canvas>
+<button id="startBtn">Start Game</button>
+
+<script>
+// ===============================
+// CONFIG
+// ===============================
+
+const WIDTH = 600;
+const HEIGHT = 800;
+
+const TONGUE_EXTEND = 45;
+const TONGUE_RETRACT = 65;
+
+const BUG_TYPES = {
+  MOSQUITO: { size:14, speed:1.6, hp:1, value:120 },
+  ANT:      { size:18, speed:1.2, hp:1, value:100 },
+  WASP:     { size:32, speed:0.9, hp:2, value:400 }
+};
+
+// ===============================
+// STATE
+// ===============================
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const startBtn = document.getElementById("startBtn");
+
+let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+let state = {
+  running:false,
+  score:0,
+  highScore:localStorage.getItem("froggy_high_score") || 0,
+  level:1,
+  lives:3,
+  combo:0,
+  comboTimer:0
+};
+
+let frog = { x:WIDTH/2, y:HEIGHT-100, scale:1 };
+let tongue = { x:0, y:0, length:0, state:"READY", hit:false };
+let bugs = [];
+let particles = [];
+let floatTexts = [];
+let keys = {};
+let lastTime = 0;
+
+// ===============================
+// SOUND
+// ===============================
+
+function playSound(freq, duration, type="square"){
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+  osc.start();
+  osc.stop(audioCtx.currentTime + duration);
+}
+
+// ===============================
+// BUG SYSTEM
+// ===============================
+
+function createBug(x,y){
+  const types = ["MOSQUITO","ANT","WASP"];
+  const type = Math.random() < 0.15 ? "WASP" : types[Math.floor(Math.random()*2)];
+  const config = BUG_TYPES[type];
+
+  return {
+    x,y,
+    type,
+    size:config.size,
+    speed:config.speed + state.level*0.1,
+    hp:config.hp,
+    value:config.value,
+    angle:Math.random()*Math.PI*2
+  };
+}
+
+function spawnLevel(){
+  bugs = [];
+  const count = 10 + state.level*2;
+
+  for(let i=0;i<count;i++){
+    bugs.push(createBug(
+      80 + (i%5)*100,
+      120 + Math.floor(i/5)*80
+    ));
+  }
+}
+
+// ===============================
+// UPDATE
+// ===============================
+
+function update(dt){
+  const m = dt/16;
+
+  // Movement
+  if(keys["ArrowLeft"]) frog.x -= 7*m;
+  if(keys["ArrowRight"]) frog.x += 7*m;
+  frog.x = Math.max(60, Math.min(WIDTH-60, frog.x));
+
+  frog.scale += (1 - frog.scale)*0.15;
+
+  // Tongue
+  if(tongue.state==="EXTENDING"){
+    tongue.length += TONGUE_EXTEND*m;
+
+    if(tongue.length > HEIGHT*0.75){
+      if(!tongue.hit) resetCombo();
+      tongue.state="RETRACTING";
+    }
+
+    const tipX = tongue.x;
+    const tipY = tongue.y - tongue.length;
+
+    for(let bug of bugs){
+      if(Math.abs(tipX-bug.x)<bug.size &&
+         Math.abs(tipY-bug.y)<bug.size){
+
+        bug.hp--;
+        tongue.hit=true;
+        tongue.state="RETRACTING";
+
+        if(bug.hp<=0){
+          killBug(bug);
+        }
+        break;
+      }
+    }
+  }
+
+  if(tongue.state==="RETRACTING"){
+    tongue.length -= TONGUE_RETRACT*m;
+    if(tongue.length<=0){
+      tongue.length=0;
+      tongue.state="READY";
+      tongue.hit=false;
+    }
+  }
+
+  // Combo decay
+  if(state.comboTimer>0){
+    state.comboTimer--;
+  } else {
+    resetCombo();
+  }
+
+  // Bugs
+  for(let bug of bugs){
+    bug.angle += 0.015*m;
+
+    if(bug.type==="MOSQUITO"){
+      bug.x += Math.sin(bug.angle*1.8)*bug.speed*1.4;
+      bug.y += Math.cos(bug.angle*1.5)*bug.speed*1.2;
+    }
+    if(bug.type==="ANT"){
+      bug.x += Math.sin(bug.angle)*bug.speed*1.2;
+      bug.y += Math.cos(bug.angle*0.6)*bug.speed*0.8;
+    }
+    if(bug.type==="WASP"){
+      bug.x += Math.sin(bug.angle*0.7)*bug.speed;
+      bug.y += Math.cos(bug.angle*0.7)*bug.speed*0.9;
+    }
+
+    // Lose life if too low
+    if(bug.y > HEIGHT-120){
+      state.lives--;
+      bugs = bugs.filter(b=>b!==bug);
+      playSound(70,0.2,"sawtooth");
+      if(state.lives<=0){
+        gameOver();
+      }
+    }
+  }
+
+  // Particles
+  particles.forEach(p=>{
+    p.x+=p.vx*m;
+    p.y+=p.vy*m;
+    p.life-=0.04*m;
+  });
+  particles = particles.filter(p=>p.life>0);
+
+  floatTexts.forEach(t=>{
+    t.y -= 1.2*m;
+    t.life -= 0.02*m;
+  });
+  floatTexts = floatTexts.filter(t=>t.life>0);
+
+  if(bugs.length===0){
+    state.level++;
+    spawnLevel();
+  }
+}
+
+// ===============================
+// COMBAT
+// ===============================
+
+function killBug(bug){
+  state.combo++;
+  state.comboTimer=150;
+
+  const multiplier = 1 + state.combo*0.2;
+  const gained = Math.floor(bug.value * multiplier);
+
+  state.score += gained;
+  floatTexts.push({x:bug.x,y:bug.y,text:"+"+gained,life:1});
+
+  if(state.score>state.highScore){
+    state.highScore=state.score;
+    localStorage.setItem("froggy_high_score",state.highScore);
+  }
+
+  createExplosion(bug.x,bug.y);
+  playSound(bug.value>300?90:400,0.12,bug.value>300?"sawtooth":"triangle");
+
+  bugs = bugs.filter(b=>b!==bug);
+}
+
+function resetCombo(){
+  state.combo=0;
+}
+
+// ===============================
+// DRAW
+// ===============================
+
+function drawFrog(){
+  ctx.save();
+  ctx.translate(frog.x,frog.y);
+  ctx.scale(frog.scale,frog.scale);
+
+  ctx.fillStyle="#3bbf6b";
+  ctx.beginPath();
+  ctx.ellipse(-40,20,25,18,0,0,Math.PI*2);
+  ctx.ellipse(40,20,25,18,0,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle="#4ade80";
+  ctx.beginPath();
+  ctx.ellipse(0,0,50,35,0,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle="#a7f3d0";
+  ctx.beginPath();
+  ctx.ellipse(0,8,28,22,0,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle="white";
+  ctx.beginPath();
+  ctx.arc(-25,-30,14,0,Math.PI*2);
+  ctx.arc(25,-30,14,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.fillStyle="black";
+  ctx.beginPath();
+  ctx.arc(-25,-30,7,0,Math.PI*2);
+  ctx.arc(25,-30,7,0,Math.PI*2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function draw(){
+  ctx.clearRect(0,0,WIDTH,HEIGHT);
+
+  drawFrog();
+
+  if(tongue.state!=="READY"){
+    ctx.strokeStyle="#f87171";
+    ctx.lineWidth=8;
+    ctx.lineCap="round";
+    ctx.beginPath();
+    ctx.moveTo(tongue.x,tongue.y);
+    ctx.lineTo(tongue.x,tongue.y-tongue.length);
+    ctx.stroke();
+  }
+
+  bugs.forEach(b=>{
+    ctx.fillStyle=b.type==="WASP"?"yellow":b.type==="ANT"?"#111":"#ccc";
+    ctx.beginPath();
+    ctx.ellipse(b.x,b.y,b.size/2,b.size,0,0,Math.PI*2);
+    ctx.fill();
+  });
+
+  particles.forEach(p=>{
+    ctx.globalAlpha=p.life;
+    ctx.fillStyle="yellow";
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,3,0,Math.PI*2);
+    ctx.fill();
+  });
+
+  ctx.globalAlpha=1;
+
+  floatTexts.forEach(t=>{
+    ctx.globalAlpha=t.life;
+    ctx.fillStyle="orange";
+    ctx.fillText(t.text,t.x,t.y);
+  });
+
+  ctx.globalAlpha=1;
+  ctx.fillStyle="white";
+  ctx.fillText("Score: "+state.score,20,30);
+  ctx.fillText("High: "+state.highScore,20,50);
+  ctx.fillText("Lives: "+state.lives,20,70);
+
+  if(state.combo>1){
+    ctx.fillStyle="orange";
+    ctx.font="bold 20px Arial";
+    ctx.fillText("COMBO x"+state.combo, WIDTH-160,40);
+  }
+}
+
+// ===============================
+// LOOP
+// ===============================
+
+function loop(time){
+  const dt = time-lastTime;
+  lastTime=time;
+  if(state.running) update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// ===============================
+// CONTROL
+// ===============================
+
+function startGame(){
+  state.running=true;
+  state.score=0;
+  state.level=1;
+  state.lives=3;
+  state.combo=0;
+  spawnLevel();
+  startBtn.style.display="none";
+  audioCtx.resume();
+}
+
+function gameOver(){
+  state.running=false;
+  startBtn.textContent="Play Again";
+  startBtn.style.display="inline-block";
+}
+
+window.addEventListener("keydown",e=>{
+  keys[e.code]=true;
+  if(e.code==="Space" && state.running && tongue.state==="READY"){
+    tongue.state="EXTENDING";
+    tongue.x=frog.x;
+    tongue.y=frog.y;
+    frog.scale=0.9;
+    playSound(180,0.08,"square");
+  }
+});
+window.addEventListener("keyup",e=>keys[e.code]=false);
+
+startBtn.onclick=startGame;
+
+spawnLevel();
+draw();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
